@@ -3,6 +3,7 @@ pub mod shapes;
 mod util;
 
 use nalgebra::Point2;
+pub use quadtree::barnes_hut::WeightedPoint;
 pub use quadtree::QuadTree;
 
 /// A 2-dimensional point with `f64` values (alias of [`nalgebra::Point2`])
@@ -17,5 +18,16 @@ pub trait Point {
 impl Point for P2 {
     fn point(&self) -> P2 {
         *self
+    }
+}
+
+/// Trait for getting the mass of data stored in the [`QuadTree`], enables use of Barnes-Hut approximation
+pub trait Mass {
+    fn mass(&self) -> f64;
+}
+
+impl Mass for P2 {
+    fn mass(&self) -> f64 {
+        1.0
     }
 }

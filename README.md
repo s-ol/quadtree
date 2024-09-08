@@ -14,4 +14,5 @@ This QuadTree library provides efficient spatial querying capabilities for 2D po
     - insert_many
     - delete
     - pop
+- **Barnes-Hut Approximation**: Implement the `Mass` trait for your data type to use [Barnes-Hut approximation](https://en.wikipedia.org/wiki/Barnes%E2%80%93Hut_simulation) for n-body simulations. An interactive explanation of this algorithm can be found [here](https://jheer.github.io/barnes-hut/).
 - **Serde Serialization**: Enable the `"serde"` feature to serialize the QuadTree and provided shapes. A `QuadTree<T>` will serialize into a sequence of items of type `T`.

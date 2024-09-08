@@ -87,6 +87,12 @@ impl Rect {
         self.center = na::center(&self.start, &self.end);
     }
 
+    /// Get the perimeter of the rect
+    pub fn perimeter(&self) -> f64 {
+        let diff = self.end - self.start;
+        diff.x * 2.0 + diff.y * 2.0
+    }
+
     /// Quarter the rect to produce four smaller rects
     pub fn quarter(&self) -> [Self; 4] {
         let &Rect { start, center, end } = self;
@@ -327,6 +333,12 @@ mod tests {
             !outer_rect.contains_rect(&overlapping_rect),
             "Outer rect should not contain overlapping rect"
         );
+    }
+
+    #[test]
+    fn rect_perimeter() {
+        let rect = make_rect(0.0, 0.0, 10.0, 5.0);
+        assert_eq!(rect.perimeter(), 30.0, "Perimeter should be 30.0");
     }
 
     #[test]
