@@ -1,14 +1,14 @@
+pub mod barnes_hut;
+
 #[cfg(feature = "serde")]
 use serde::{ser::SerializeSeq, Serialize, Serializer};
 
 use crate::{
-    barnes_hut::WeightedPoint,
     shapes::{Rect, Shape},
     util::{determine_overlap_quadrants, determine_quadrant, group_by_quadrant},
     Point, P2,
 };
-
-pub mod barnes_hut;
+use barnes_hut::WeightedPoint;
 
 /// A generic QuadTree implementation for spatial indexing of 2D points
 #[derive(Debug)]
