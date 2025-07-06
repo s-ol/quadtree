@@ -1,32 +1,32 @@
 pub mod barnes_hut;
 
+use glam::Vec2;
 #[cfg(feature = "serde")]
-use serde::{ser::SerializeSeq, Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeSeq};
 
 use crate::{
+    Point,
     shapes::{Rect, Shape},
-    util::{determine_overlap_quadrants, determine_quadrant, group_by_quadrant},
-    Point, P2,
+    util::{determine_overlap_quadrants, group_by_quadrant},
 };
-use barnes_hut::WeightedPoint;
 
-/// A generic QuadTree implementation for spatial indexing of 2D points
+/// A generic Quadtree implementation for spatial indexing of 2D points
 #[derive(Debug)]
-pub struct QuadTree<T> {
+pub struct Quadtree<T> {
     root: Node<T>,
     node_capacity: usize,
     count: usize,
 }
 
-impl<T: Point + Clone> QuadTree<T> {
+impl<T: Point + Clone> Quadtree<T> {
     /// Create a new empty quadtree
     ///
     /// ## Arguments
-    /// - `boundary`: The boundary of the quadtree
+    /// - `bound`: The bound of the quadtree
     /// - `node_capacity`: The maximum number of items a node can hold before subdividing
-    pub const fn new(boundary: Rect, node_capacity: usize) -> Self {
+    pub const fn new(bound: Rect, node_capacity: usize) -> Self {
         Self {
-            root: Node::Empty { boundary },
+            root: Node::Empty { bound: bound },
             node_capacity,
             count: 0,
         }
@@ -37,7 +37,7 @@ impl<T: Point + Clone> QuadTree<T> {
         self.count
     }
 
-    /// Insert an item into the QuadTree
+    /// Insert an item into the Quadtree
     ///
     /// **Returns** a boolean value indicating if the item was inserted successfully
     pub fn insert(&mut self, item: &T) -> bool {
@@ -48,7 +48,7 @@ impl<T: Point + Clone> QuadTree<T> {
         success
     }
 
-    /// Insert multiple items into the QuadTree
+    /// Insert multiple items into the Quadtree
     ///
     /// **Returns** a vector of items that failed to insert, if any
     pub fn insert_many(&mut self, items: &[T]) -> Vec<T> {
@@ -64,7 +64,7 @@ impl<T: Point + Clone> QuadTree<T> {
     /// Get an item by its exact position
     ///
     /// **Returns** an `Option` containing the item if it exists
-    pub fn get(&self, point: &P2) -> Option<T> {
+    pub fn get(&self, point: Vec2) -> Option<T> {
         self.root.get(point)
     }
 
@@ -161,20 +161,20 @@ impl<T: Point + Clone> QuadTree<T> {
     }
 
     /// Return the point at the center of the boundary
-    pub fn center(&self) -> P2 {
+    pub fn center(&self) -> Vec2 {
         self.root.center()
     }
 
     /// Get the boundary rect of the quadtree
-    pub const fn boundary(&self) -> Rect {
-        self.root.boundary()
+    pub const fn bound(&self) -> Rect {
+        self.root.bound()
     }
 }
 
 #[cfg(feature = "serde")]
-impl<T: Serialize + Point + Clone> Serialize for QuadTree<T> {
+impl<T: Serialize + Point + Clone> Serialize for Quadtree<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let items = self.query_ref(&self.boundary());
+        let items = self.query_ref(&self.bound());
         let mut seq = serializer.serialize_seq(Some(items.len()))?;
         for item in items {
             seq.serialize_element(item)?;
@@ -183,7 +183,7 @@ impl<T: Serialize + Point + Clone> Serialize for QuadTree<T> {
     }
 }
 
-/// QuadTree node enum
+/// Quadtree node enum
 ///
 /// ## Variants
 /// - `Internal`: Contains children nodes and represents a subdivided area
@@ -192,17 +192,15 @@ impl<T: Serialize + Point + Clone> Serialize for QuadTree<T> {
 #[derive(Debug)]
 pub(crate) enum Node<T> {
     Internal {
-        boundary: Rect,
-        cm: Option<WeightedPoint>,
+        bound: Rect,
         children: [Box<Self>; 4],
     },
     External {
-        boundary: Rect,
-        cm: Option<WeightedPoint>,
+        bound: Rect,
         data: Vec<T>,
     },
     Empty {
-        boundary: Rect,
+        bound: Rect,
     },
 }
 
@@ -210,23 +208,19 @@ impl<T: Point + Clone> Node<T> {
     fn insert(&mut self, item: &T, capacity: usize) -> bool {
         let point = item.point();
 
-        if !self.boundary().contains(&point) {
+        if !self.bound().contains(point) {
             return false;
         }
 
         match *self {
-            Self::Empty { boundary } => {
+            Self::Empty { bound } => {
                 let mut data = Vec::with_capacity(capacity);
                 data.push(item.clone());
-                *self = Self::External {
-                    boundary,
-                    data,
-                    cm: None,
-                };
+                *self = Self::External { bound, data };
                 true
             }
             Self::External {
-                boundary,
+                bound,
                 ref mut data,
                 ..
             } => {
@@ -238,21 +232,17 @@ impl<T: Point + Clone> Node<T> {
                 let mut data = std::mem::take(data);
                 data.push(item.clone());
                 let children = self.subdivide();
-                *self = Self::Internal {
-                    boundary,
-                    children,
-                    cm: None,
-                };
+                *self = Self::Internal { bound, children };
 
                 let mut failed = Vec::with_capacity(data.len());
                 self.insert_many(data, capacity, &mut failed);
                 failed.len() == 0
             }
             Self::Internal {
-                boundary,
+                bound,
                 ref mut children,
                 ..
-            } => match determine_quadrant(&boundary, &point) {
+            } => match bound.quadrant(point) {
                 Some(q) => children[q].insert(item, capacity),
                 None => false,
             },
@@ -261,26 +251,18 @@ impl<T: Point + Clone> Node<T> {
 
     fn insert_many(&mut self, mut items: Vec<T>, capacity: usize, failed: &mut Vec<T>) {
         match *self {
-            Self::Empty { boundary } => {
+            Self::Empty { bound } => {
                 if items.len() <= capacity {
                     items.reserve_exact(capacity - items.len());
-                    *self = Self::External {
-                        boundary,
-                        data: items,
-                        cm: None,
-                    };
+                    *self = Self::External { bound, data: items };
                 } else {
                     let children = self.subdivide();
-                    *self = Self::Internal {
-                        boundary,
-                        children,
-                        cm: None,
-                    };
+                    *self = Self::Internal { bound, children };
                     self.insert_many(items, capacity, failed);
                 }
             }
             Self::External {
-                boundary,
+                bound,
                 ref mut data,
                 ..
             } => {
@@ -291,19 +273,15 @@ impl<T: Point + Clone> Node<T> {
 
                 items.append(data);
                 let children = self.subdivide();
-                *self = Self::Internal {
-                    boundary,
-                    children,
-                    cm: None,
-                };
+                *self = Self::Internal { bound, children };
                 self.insert_many(items, capacity, failed);
             }
             Self::Internal {
-                boundary,
+                bound,
                 ref mut children,
                 ..
             } => {
-                let mut groups = group_by_quadrant(&boundary, items).into_iter();
+                let mut groups = group_by_quadrant(bound, items).into_iter();
                 for c in children {
                     let items = groups.next().unwrap();
                     if items.len() > 0 {
@@ -324,22 +302,22 @@ impl<T: Point + Clone> Node<T> {
         F: Fn(&T) -> bool,
     {
         match self {
-            Self::External { boundary, data, .. } => {
-                if shape.contains_rect(boundary) {
+            Self::External { bound, data, .. } => {
+                if shape.contains_rect(bound) {
                     results.extend(data.iter().filter(|&a| filter(a)).cloned());
                 } else {
                     for item in data {
-                        if shape.contains(&item.point()) && filter(item) {
+                        if shape.contains(item.point()) && filter(item) {
                             results.push(item.clone());
                         }
                     }
                 }
             }
             Self::Internal {
-                boundary, children, ..
+                bound, children, ..
             } => {
-                if boundary.intersects(&shape.rect()) {
-                    for q in determine_overlap_quadrants(boundary, &shape.rect()) {
+                if bound.intersects(&shape.aabb()) {
+                    for q in determine_overlap_quadrants(bound, &shape.aabb()) {
                         children[q].query(shape, filter, results);
                     }
                 }
@@ -354,23 +332,23 @@ impl<T: Point + Clone> Node<T> {
         F: Fn(&T) -> bool,
     {
         match self {
-            Self::External { boundary, data, .. } => {
-                if shape.contains_rect(boundary) {
+            Self::External { bound, data, .. } => {
+                if shape.contains_rect(bound) {
                     results.extend(data.iter().filter(|&a| filter(a)));
                     return;
                 }
 
                 for item in data {
-                    if shape.contains(&item.point()) && filter(item) {
+                    if shape.contains(item.point()) && filter(item) {
                         results.push(item);
                     }
                 }
             }
             Self::Internal {
-                boundary, children, ..
+                bound, children, ..
             } => {
-                if boundary.intersects(&shape.rect()) {
-                    for q in determine_overlap_quadrants(boundary, &shape.rect()) {
+                if bound.intersects(&shape.aabb()) {
+                    for q in determine_overlap_quadrants(bound, &shape.aabb()) {
                         children[q].query_ref(shape, filter, results);
                     }
                 }
@@ -379,19 +357,19 @@ impl<T: Point + Clone> Node<T> {
         }
     }
 
-    fn get(&self, point: &P2) -> Option<T> {
+    fn get(&self, point: Vec2) -> Option<T> {
         match self {
             Self::External { data, .. } => {
                 for item in data {
-                    if item.point() == *point {
+                    if item.point() == point {
                         return Some(item.clone());
                     }
                 }
                 None
             }
             Self::Internal {
-                boundary, children, ..
-            } => match determine_quadrant(boundary, point) {
+                bound, children, ..
+            } => match bound.quadrant(point) {
                 Some(q) => children[q].get(point),
                 None => None,
             },
@@ -407,31 +385,31 @@ impl<T: Point + Clone> Node<T> {
     {
         match *self {
             Self::External {
-                boundary,
+                bound,
                 ref mut data,
                 ..
             } => {
-                if !boundary.intersects(&shape.rect()) {
+                if !bound.intersects(&shape.aabb()) {
                     return false;
                 }
 
                 let original_data_len = data.len();
-                data.retain(|item| !(shape.contains(&item.point()) && filter(item)));
+                data.retain(|item| !(shape.contains(item.point()) && filter(item)));
                 *deleted += original_data_len - data.len();
 
                 if data.is_empty() {
-                    *self = Self::Empty { boundary };
+                    *self = Self::Empty { bound };
                     return true;
                 }
 
                 false
             }
             Self::Internal {
-                boundary,
+                bound,
                 ref mut children,
                 ..
             } => {
-                if boundary.intersects(&shape.rect()) {
+                if bound.intersects(&shape.aabb()) {
                     let mut is_all_empty = true;
                     for c in children {
                         let is_empty = c.delete(shape, filter, deleted);
@@ -440,7 +418,7 @@ impl<T: Point + Clone> Node<T> {
                         }
                     }
                     if is_all_empty {
-                        *self = Self::Empty { boundary };
+                        *self = Self::Empty { bound };
                         return true;
                     }
                 }
@@ -459,17 +437,17 @@ impl<T: Point + Clone> Node<T> {
     {
         match *self {
             Self::External {
-                boundary,
+                bound,
                 ref mut data,
                 ..
             } => {
-                if !boundary.intersects(&shape.rect()) {
+                if !bound.intersects(&shape.aabb()) {
                     return false;
                 }
 
                 let mut left_data = Vec::with_capacity(data.capacity());
                 for item in data.drain(..) {
-                    if shape.contains(&item.point()) && filter(&item) {
+                    if shape.contains(item.point()) && filter(&item) {
                         results.push(item);
                     } else {
                         left_data.push(item);
@@ -477,7 +455,7 @@ impl<T: Point + Clone> Node<T> {
                 }
 
                 if left_data.is_empty() {
-                    *self = Self::Empty { boundary };
+                    *self = Self::Empty { bound };
                     true
                 } else {
                     *data = left_data;
@@ -485,11 +463,11 @@ impl<T: Point + Clone> Node<T> {
                 }
             }
             Self::Internal {
-                boundary,
+                bound,
                 ref mut children,
                 ..
             } => {
-                if boundary.intersects(&shape.rect()) {
+                if bound.intersects(&shape.aabb()) {
                     let mut is_all_empty = true;
                     for c in children {
                         let is_empty = c.pop(shape, filter, results);
@@ -498,7 +476,7 @@ impl<T: Point + Clone> Node<T> {
                         }
                     }
                     if is_all_empty {
-                        *self = Self::Empty { boundary };
+                        *self = Self::Empty { bound };
                         return true;
                     }
                 }
@@ -509,51 +487,51 @@ impl<T: Point + Clone> Node<T> {
         }
     }
 
-    fn center(&self) -> P2 {
-        self.boundary().center()
+    fn center(&self) -> Vec2 {
+        self.bound().center()
     }
 
-    const fn boundary(&self) -> Rect {
+    const fn bound(&self) -> Rect {
         match self {
-            Self::Empty { boundary } => *boundary,
-            Self::External { boundary, .. } => *boundary,
-            Self::Internal { boundary, .. } => *boundary,
+            Self::Empty { bound } => *bound,
+            Self::External { bound, .. } => *bound,
+            Self::Internal { bound, .. } => *bound,
         }
     }
 
     fn subdivide(&self) -> [Box<Self>; 4] {
-        let rects = self.boundary().quarter();
-        rects.map(|r| Box::new(Self::Empty { boundary: r }))
+        let rects = self.bound().quarter();
+        rects.map(|r| Box::new(Self::Empty { bound: r }))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use nalgebra::point;
+    use glam::vec2;
 
     use crate::{
+        Point,
         shapes::Circle,
         util::tests::{make_circle, make_rect},
-        Point,
     };
 
     use super::*;
 
     #[test]
     fn insert_single_item() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let item = point![25.0, 25.0];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let item = vec2(25.0, 25.0);
         assert!(qt.insert(&item), "Should insert item successfully");
     }
 
     #[test]
     fn insert_multiple_items() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
         let points = vec![
-            point![10.0, 10.0],
-            point![150.0, 150.0], // This should fail (out of bounds)
-            point![20.0, 20.0],
-            point![120.0, 120.0], // This should fail (out of bounds)
+            vec2(10.0, 10.0),
+            vec2(150.0, 150.0), // This should fail (out of bounds)
+            vec2(20.0, 20.0),
+            vec2(120.0, 120.0), // This should fail (out of bounds)
         ];
 
         let failed_inserts = qt.insert_many(&points);
@@ -568,13 +546,13 @@ mod tests {
             "Should include point (120, 120) as failed"
         );
 
-        // Ensure that successful points are indeed in the QuadTree
+        // Ensure that successful points are indeed in the Quadtree
         assert!(
-            qt.get(&points[0].point()).is_some(),
+            qt.get(points[0].point()).is_some(),
             "Point (10, 10) should be successfully inserted"
         );
         assert!(
-            qt.get(&points[2].point()).is_some(),
+            qt.get(points[2].point()).is_some(),
             "Point (20, 20) should be successfully inserted"
         );
 
@@ -588,15 +566,15 @@ mod tests {
 
     #[test]
     fn insert_item_out_of_bounds() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let item = point![150.0, 150.0];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let item = vec2(150.0, 150.0);
         assert!(!qt.insert(&item), "Should not insert item outside bounds");
     }
 
     #[test]
     fn insert_multiple_items_subdivision() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 2);
-        let points = vec![point![20.0, 20.0], point![40.0, 40.0], point![60.0, 60.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 2);
+        let points = vec![vec2(20.0, 20.0), vec2(40.0, 40.0), vec2(60.0, 60.0)];
 
         qt.insert_many(&points);
 
@@ -608,34 +586,30 @@ mod tests {
                     "Should have four children after subdivision"
                 );
             }
-            _ => panic!("QuadTree should have subdivided into an internal node"),
+            _ => panic!("Quadtree should have subdivided into an internal node"),
         }
     }
 
     #[test]
     fn get_item() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let point = point![20.0, 20.0];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let point = vec2(20.0, 20.0);
         qt.insert(&point);
 
-        assert_eq!(
-            qt.get(&point),
-            Some(point),
-            "Should find the inserted point"
-        );
+        assert_eq!(qt.get(point), Some(point), "Should find the inserted point");
         assert!(
-            qt.get(&point![30.0, 30.0]).is_none(),
+            qt.get(vec2(30.0, 30.0)).is_none(),
             "Should not find a point that was not inserted"
         );
     }
 
     #[test]
     fn query_rectangular() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
         let results = qt.query(&make_rect(10.0, 10.0, 50.0, 50.0));
         assert!(results.is_empty(), "Should be empty for an empty tree");
 
-        let item = point![25.0, 25.0];
+        let item = vec2(25.0, 25.0);
         qt.insert(&item);
         let results = qt.query(&make_rect(20.0, 20.0, 30.0, 30.0));
         assert_eq!(results.len(), 1, "Should find one item in the range");
@@ -654,8 +628,8 @@ mod tests {
 
     #[test]
     fn query_ref_rectangular() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let item = point![25.0, 25.0];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let item = vec2(25.0, 25.0);
         qt.insert(&item);
         let results = qt.query_ref(&make_rect(20.0, 20.0, 30.0, 30.0));
         assert_eq!(results.len(), 1, "Should find one item in the range");
@@ -668,9 +642,9 @@ mod tests {
 
     #[test]
     fn query_rectangular_internal_nodes_multiple_items() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let item1 = point![25.0, 25.0];
-        let item2 = point![75.0, 75.0];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let item1 = vec2(25.0, 25.0);
+        let item2 = vec2(75.0, 75.0);
         qt.insert(&item1);
         qt.insert(&item2);
 
@@ -694,8 +668,8 @@ mod tests {
 
     #[test]
     fn query_rectangular_boundary_edge_overlap() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 4);
-        let edge_point = point![100.0, 50.0]; // Exactly on the boundary edge
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 4);
+        let edge_point = vec2(100.0, 50.0); // Exactly on the boundary edge
         qt.insert(&edge_point);
         let query_shape = make_rect(95.0, 45.0, 105.0, 55.0);
         let results = qt.query(&query_shape);
@@ -704,12 +678,12 @@ mod tests {
 
     #[test]
     fn query_circular_empty_tree() {
-        let mut qt = QuadTree::<P2>::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let mut qt = Quadtree::<Vec2>::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
         let circle = make_circle(50.0, 50.0, 10.0);
         let results = qt.query(&circle);
         assert!(results.is_empty(), "Should be empty for an empty tree");
 
-        let item = point![25.0, 25.0];
+        let item = vec2(25.0, 25.0);
         qt.insert(&item);
         let circle = make_circle(20.0, 20.0, 10.0);
         let results = qt.query(&circle);
@@ -730,9 +704,9 @@ mod tests {
 
     #[test]
     fn query_circular_internal_nodes_multiple_items() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let item1 = point![35.0, 35.0];
-        let item2 = point![65.0, 65.0];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let item1 = vec2(35.0, 35.0);
+        let item2 = vec2(65.0, 65.0);
         qt.insert(&item1);
         qt.insert(&item2);
 
@@ -759,12 +733,12 @@ mod tests {
 
     #[test]
     fn query_filter_exclude_point() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let items = vec![point![40.0, 40.0], point![50.0, 50.0], point![60.0, 60.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let items = vec![vec2(40.0, 40.0), vec2(50.0, 50.0), vec2(60.0, 60.0)];
         qt.insert_many(&items);
 
         let area = Circle::new(items[1], 20.0);
-        let results = qt.query_filter(&area, |p| p.point() != area.center());
+        let results = qt.query_filter(&area, |p| p.point() != area.center);
         assert!(
             !results.contains(&items[1]),
             "Should not find the excluded point"
@@ -774,12 +748,12 @@ mod tests {
 
     #[test]
     fn query_ref_filter_exclude_point() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let items = vec![point![40.0, 40.0], point![50.0, 50.0], point![60.0, 60.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let items = vec![vec2(40.0, 40.0), vec2(50.0, 50.0), vec2(60.0, 60.0)];
         qt.insert_many(&items);
 
         let area = Circle::new(items[1], 20.0);
-        let results = qt.query_ref_filter(&area, |p| p.point() != area.center());
+        let results = qt.query_ref_filter(&area, |p| p.point() != area.center);
         assert!(
             !results.contains(&&items[1]),
             "Should not find the excluded point"
@@ -789,8 +763,8 @@ mod tests {
 
     #[test]
     fn delete_rect() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let points = vec![point![10.0, 10.0], point![30.0, 10.0], point![10.0, 30.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let points = vec![vec2(10.0, 10.0), vec2(30.0, 10.0), vec2(10.0, 30.0)];
         qt.insert_many(&points);
 
         let deletion_shape = make_rect(5.0, 5.0, 35.0, 15.0);
@@ -798,23 +772,23 @@ mod tests {
         assert_eq!(deleted, 2, "Two items were deleted");
         assert_eq!(qt.count(), 1, "One item remains in tree");
         assert!(
-            qt.get(&points[0]).is_none(),
+            qt.get(points[0]).is_none(),
             "Point at (10.0, 10.0) should have been deleted"
         );
         assert!(
-            qt.get(&points[1]).is_none(),
+            qt.get(points[1]).is_none(),
             "Point at (30.0, 10.0) should have been deleted"
         );
         assert!(
-            qt.get(&points[2]).is_some(),
+            qt.get(points[2]).is_some(),
             "Point at (10.0, 30.0) should still exist"
         );
     }
 
     #[test]
     fn delete_rect_bounds() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let points = vec![point![10.0, 10.0], point![20.0, 20.0], point![30.0, 30.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let points = vec![vec2(10.0, 10.0), vec2(20.0, 20.0), vec2(30.0, 30.0)];
         for point in &points {
             qt.insert(point);
         }
@@ -825,30 +799,30 @@ mod tests {
         assert_eq!(deleted, 1, "One item was deleted");
         assert_eq!(qt.count(), 2, "Two items remain in tree");
         assert!(
-            qt.get(&points[0]).is_some(),
+            qt.get(points[0]).is_some(),
             "Point at (10.0, 10.0) should still exist"
         );
         assert!(
-            qt.get(&points[1]).is_none(),
+            qt.get(points[1]).is_none(),
             "Point at (20.0, 20.0) should have been deleted"
         );
         assert!(
-            qt.get(&points[2]).is_some(),
+            qt.get(points[2]).is_some(),
             "Point at (30.0, 30.0) should still exist"
         );
     }
 
     #[test]
     fn delete_rect_multi_level() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 2);
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 2);
         // Points to cause subdivisions
         let points = [
-            point![10.0, 10.0],
-            point![90.0, 90.0],
-            point![10.0, 90.0],
-            point![90.0, 10.0],
-            point![50.0, 50.0],
-            point![30.0, 30.0],
+            vec2(10.0, 10.0),
+            vec2(90.0, 90.0),
+            vec2(10.0, 90.0),
+            vec2(90.0, 10.0),
+            vec2(50.0, 50.0),
+            vec2(30.0, 30.0),
         ];
         for p in &points {
             qt.insert(p);
@@ -865,8 +839,8 @@ mod tests {
 
     #[test]
     fn delete_filter_exclude_point() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let points = vec![point![15.0, 15.0], point![20.0, 20.0], point![25.0, 25.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let points = vec![vec2(15.0, 15.0), vec2(20.0, 20.0), vec2(25.0, 25.0)];
         qt.insert_many(&points);
 
         let area = make_rect(10.0, 10.0, 30.0, 30.0);
@@ -874,27 +848,27 @@ mod tests {
         assert_eq!(deleted, 2, "Two items were deleted");
         assert_eq!(qt.count(), 1, "One item remains in tree");
         assert!(
-            qt.get(&points[0]).is_none(),
+            qt.get(points[0]).is_none(),
             "Point at (15.0, 15.0) should have been deleted"
         );
         assert!(
-            qt.get(&points[1]).is_some(),
+            qt.get(points[1]).is_some(),
             "Point at (20.0, 20.0) should still exist"
         );
         assert!(
-            qt.get(&points[2]).is_none(),
+            qt.get(points[2]).is_none(),
             "Point at (25.0, 25.0) should have been deleted"
         );
     }
 
     #[test]
     fn test_pop_function() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
         let points = vec![
-            point![10.0, 10.0],
-            point![20.0, 20.0],
-            point![30.0, 30.0],
-            point![40.0, 40.0],
+            vec2(10.0, 10.0),
+            vec2(20.0, 20.0),
+            vec2(30.0, 30.0),
+            vec2(40.0, 40.0),
         ];
 
         qt.insert_many(&points);
@@ -930,8 +904,8 @@ mod tests {
 
     #[test]
     fn pop_filter_exclude_point() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let points = vec![point![15.0, 15.0], point![20.0, 20.0], point![25.0, 25.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let points = vec![vec2(15.0, 15.0), vec2(20.0, 20.0), vec2(25.0, 25.0)];
         qt.insert_many(&points);
 
         let area = make_rect(10.0, 10.0, 30.0, 30.0);
@@ -947,15 +921,15 @@ mod tests {
             "Point at (20.0, 20.0) should not have been popped"
         );
         assert!(
-            qt.get(&points[1]).is_some(),
+            qt.get(points[1]).is_some(),
             "Point at (20.0, 20.0) should still exist"
         );
     }
 
     #[test]
     fn precise_floating_point_handling() {
-        let mut qt = QuadTree::new(make_rect(0.00001, 0.00001, 99.99999, 99.99999), 2);
-        let point = point![0.0001, 0.0001];
+        let mut qt = Quadtree::new(make_rect(0.00001, 0.00001, 99.99999, 99.99999), 2);
+        let point = vec2(0.0001, 0.0001);
         assert!(
             qt.insert(&point),
             "Point near the boundary should be inserted."
@@ -965,16 +939,16 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_quadtree_serialization() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-        let points = vec![point![10.0, 10.0], point![20.0, 20.0], point![30.0, 30.0]];
+        let mut qt = Quadtree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
+        let points = vec![vec2(10.0, 10.0), vec2(20.0, 20.0), vec2(30.0, 30.0)];
         qt.insert_many(&points);
 
-        let serialized = serde_json::to_string(&qt).expect("Failed to serialize QuadTree");
+        let serialized = serde_json::to_string(&qt).expect("Failed to serialize Quadtree");
         let expected_json = r#"[[10.0,10.0],[20.0,20.0],[30.0,30.0]]"#;
 
         assert_eq!(
             serialized, expected_json,
-            "Serialized QuadTree does not match expected JSON output"
+            "Serialized Quadtree does not match expected JSON output"
         );
     }
 }

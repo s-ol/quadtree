@@ -1,234 +1,175 @@
-use nalgebra::{self as na, vector};
+use glam::{Vec2, vec2};
 
 #[cfg(feature = "serde")]
 use serde::Serialize;
 
-use crate::{Point, P2};
-
-/// A trait for shapes that can be used to query the QuadTree. Shapes must be able to
+/// A trait for shapes that can be used to query the Quadtree. Shapes must be able to
 /// provide their start and end points, their center point, and check if they contain
 /// a point. They must also be able to check if they intersect with another shape.
 pub trait Shape {
-    /// Get the start point of the shape
-    fn start(&self) -> P2;
-    /// Get the end point of the shape
-    fn end(&self) -> P2;
-    /// Get the center point of the shape
-    fn center(&self) -> P2;
+    /// Get the bounding rect of the shape
+    fn aabb(&self) -> Rect;
     /// Check if the shape contains a point
-    fn contains(&self, point: &P2) -> bool;
+    fn contains(&self, point: Vec2) -> bool;
     /// Check if the shape shares any space with another shape
     fn intersects(&self, other: &Self) -> bool;
-
-    /// Get the bounding rect of the shape
-    fn rect(&self) -> Rect {
-        Rect::new(self.start(), self.end())
-    }
-
     /// Check if the shape fully contains a given rect
     fn contains_rect(&self, rect: &Rect) -> bool {
-        self.contains(&rect.start()) && self.contains(&rect.end())
+        self.contains(rect.aa()) && self.contains(rect.bb())
     }
 }
 
-impl<T: Point> Shape for T {
-    fn start(&self) -> P2 {
-        self.point()
+impl Shape for Vec2 {
+    fn aabb(&self) -> Rect {
+        Rect::new(*self, *self)
     }
 
-    fn end(&self) -> P2 {
-        self.point()
-    }
-
-    fn center(&self) -> P2 {
-        self.point()
-    }
-
-    fn contains(&self, point: &P2) -> bool {
-        self.point() == *point
+    fn contains(&self, point: Vec2) -> bool {
+        *self == point
     }
 
     fn intersects(&self, other: &Self) -> bool {
-        self.point() == other.point()
+        self == other
     }
 }
 
 /// Represents an axis-aligned rectangle defined by two points: the start and the end.
-/// It is used to define boundaries for QuadTree nodes and provides utility functions
+/// It is used to define boundaries for Quadtree nodes and provides utility functions
 /// for geometric calculations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct Rect {
-    start: P2,
-    #[cfg_attr(feature = "serde", serde(skip))]
-    center: P2,
-    end: P2,
+    /// Start
+    pub aa: Vec2,
+    /// End
+    pub bb: Vec2,
 }
 
 impl Rect {
     /// Create a new rect with a start and end point
-    pub fn new(start: P2, end: P2) -> Self {
-        Self {
-            start,
-            center: na::center(&start, &end),
-            end,
-        }
+    pub const fn new(a: Vec2, b: Vec2) -> Self {
+        Self { aa: a, bb: b }
     }
 
-    /// Set the start point of the rect
-    pub fn set_start(&mut self, start: P2) {
-        self.start = start;
-        self.center = na::center(&self.start, &self.end);
+    /// Get the point (aa.x, aa.y)
+    pub const fn aa(&self) -> Vec2 {
+        self.aa
     }
 
-    /// Set the end point of the rect
-    pub fn set_end(&mut self, end: P2) {
-        self.end = end;
-        self.center = na::center(&self.start, &self.end);
+    /// Get the point (bb.x, bb.y)
+    pub const fn bb(&self) -> Vec2 {
+        self.bb
+    }
+
+    /// Get the point (aa.x, bb.y)
+    pub const fn ab(&self) -> Vec2 {
+        vec2(self.aa.x, self.bb.y)
+    }
+
+    /// Get the point (bb.x, aa.y)
+    pub const fn ba(&self) -> Vec2 {
+        vec2(self.bb.x, self.aa.y)
+    }
+
+    /// Get the midpoint of aa and bb
+    pub fn center(&self) -> Vec2 {
+        Vec2::midpoint(self.aa, self.bb)
     }
 
     /// Get the perimeter of the rect
-    pub fn perimeter(&self) -> f64 {
-        let diff = self.end - self.start;
+    pub fn perimeter(&self) -> f32 {
+        let diff = self.bb - self.aa;
         diff.x * 2.0 + diff.y * 2.0
     }
 
     /// Quarter the rect to produce four smaller rects
     pub fn quarter(&self) -> [Self; 4] {
-        let &Rect { start, center, end } = self;
-        let diff = center - start;
-        let diff_x = na::vector![diff.x, 0.];
-        let diff_y = na::vector![0., diff.y];
+        let center = self.center();
+        let diff = center - self.aa;
+        let diff_x = vec2(diff.x, 0.);
+        let diff_y = vec2(0., diff.y);
 
         [
-            Rect::new(start, center),
-            Rect::new(start + diff_x, center + diff_x),
-            Rect::new(start + diff_y, center + diff_y),
-            Rect::new(center, end),
+            Rect::new(self.aa, center),
+            Rect::new(self.aa + diff_x, center + diff_x),
+            Rect::new(self.aa + diff_y, center + diff_y),
+            Rect::new(center, self.bb),
         ]
+    }
+
+    /// Determine quadrant index (z-order), or `None` if the point is outside of the rect
+    pub fn quadrant(&self, point: Vec2) -> Option<usize> {
+        if !self.contains(point) {
+            return None;
+        }
+
+        let center = self.center();
+        Some(((point.y > center.y) as usize) << 1 | (point.x > center.x) as usize)
     }
 }
 
 impl Shape for Rect {
-    fn start(&self) -> P2 {
-        self.start
+    fn aabb(&self) -> Rect {
+        *self
     }
 
-    fn end(&self) -> P2 {
-        self.end
-    }
-
-    fn center(&self) -> P2 {
-        self.center
-    }
-
-    fn contains(&self, point: &P2) -> bool {
-        *point >= self.start && *point <= self.end
+    fn contains(&self, point: Vec2) -> bool {
+        point.x >= self.aa.x && point.y >= self.aa.y && point.x <= self.bb.x && point.y <= self.bb.y
     }
 
     fn intersects(&self, other: &Self) -> bool {
-        !(self.end.x < other.start.x
-            || self.start.x > other.end.x
-            || self.end.y < other.start.y
-            || self.start.y > other.end.y)
-    }
-
-    fn rect(&self) -> Rect {
-        *self
+        !(self.bb.x < other.aa.x
+            || self.aa.x > other.bb.x
+            || self.bb.y < other.aa.y
+            || self.aa.y > other.bb.y)
     }
 }
 
 /// Represents a circle defined by a center point and radius. Provides utility functions
-/// for geometric calculations, particularly for interactions with QuadTree.
+/// for geometric calculations, particularly for interactions with Quadtree.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct Circle {
-    center: P2,
-    radius: f64,
-    #[cfg_attr(feature = "serde", serde(skip))]
-    start: P2,
-    #[cfg_attr(feature = "serde", serde(skip))]
-    end: P2,
+    pub center: Vec2,
+    pub radius: f32,
 }
 
 impl Circle {
     /// Create a new circle with a center point and radius
-    pub fn new(center: P2, radius: f64) -> Self {
-        let v = vector![radius, radius];
-        let start = center - v;
-        let end = center + v;
-        Self {
-            center,
-            radius,
-            start,
-            end,
-        }
-    }
-
-    fn update_bounds(&mut self) {
-        let v = vector![self.radius, self.radius];
-        self.start = self.center - v;
-        self.end = self.center + v;
-    }
-
-    /// Set the center point of the circle
-    pub fn set_center(&mut self, center: P2) {
-        self.center = center;
-        self.update_bounds();
-    }
-
-    /// Set the radius of the circle
-    pub fn set_radius(&mut self, radius: f64) {
-        self.radius = radius;
-        self.update_bounds();
+    pub const fn new(center: Vec2, radius: f32) -> Self {
+        Self { center, radius }
     }
 }
 
 impl Shape for Circle {
-    fn start(&self) -> P2 {
-        self.start
+    fn aabb(&self) -> Rect {
+        let v = vec2(self.radius, self.radius);
+        Rect::new(self.center - v, self.center + v)
     }
 
-    fn end(&self) -> P2 {
-        self.end
-    }
-
-    fn center(&self) -> P2 {
-        self.center
-    }
-
-    fn contains(&self, point: &P2) -> bool {
-        na::distance(&self.center, point) <= self.radius
+    fn contains(&self, point: Vec2) -> bool {
+        Vec2::distance(self.center, point) <= self.radius
     }
 
     fn intersects(&self, other: &Self) -> bool {
-        na::distance(&self.center, &other.center) <= self.radius + other.radius
+        Vec2::distance(self.center, other.center) <= self.radius + other.radius
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::util::tests::{make_circle, make_rect};
-    use nalgebra::point;
 
     use super::*;
 
     #[test]
     fn rect_properties() {
         let rect = make_rect(0.0, 0.0, 10.0, 10.0);
-        assert_eq!(
-            rect.start(),
-            point![0.0, 0.0],
-            "Start should be at (0.0, 0.0)"
-        );
-        assert_eq!(
-            rect.end(),
-            point![10.0, 10.0],
-            "End should be at (10.0, 10.0)"
-        );
+        assert_eq!(rect.aa(), vec2(0.0, 0.0), "Start should be at (0.0, 0.0)");
+        assert_eq!(rect.bb(), vec2(10.0, 10.0), "End should be at (10.0, 10.0)");
         assert_eq!(
             rect.center(),
-            point![5.0, 5.0],
+            vec2(5.0, 5.0),
             "Center should be at (5.0, 5.0)"
         );
     }
@@ -237,19 +178,19 @@ mod tests {
     fn rect_contains_point() {
         let rect = make_rect(0.0, 0.0, 10.0, 10.0);
         assert!(
-            rect.contains(&point![5.0, 5.0]),
+            rect.contains(vec2(5.0, 5.0)),
             "Rect should contain point (5.0, 5.0)"
         );
         assert!(
-            !rect.contains(&point![-1.0, 5.0]),
+            !rect.contains(vec2(-1.0, 5.0)),
             "Rect should not contain point (-1.0, 5.0)"
         );
         assert!(
-            rect.contains(&point![0.0, 0.0]),
+            rect.contains(vec2(0.0, 0.0)),
             "Rect should contain its start point (0.0, 0.0)"
         );
         assert!(
-            rect.contains(&point![10.0, 10.0]),
+            rect.contains(vec2(10.0, 10.0)),
             "Rect should contain its end point (10.0, 10.0)"
         );
     }
@@ -369,23 +310,41 @@ mod tests {
     }
 
     #[test]
+    fn test_determine_quadrant() {
+        let rect = make_rect(0.0, 0.0, 10.0, 10.0);
+        let points = [
+            vec2(2.5, 2.5),   // Should be in the first quadrant (index 0)
+            vec2(7.5, 2.5),   // Should be in the second quadrant (index 1)
+            vec2(2.5, 7.5),   // Should be in the third quadrant (index 2)
+            vec2(7.5, 7.5),   // Should be in the fourth quadrant (index 3)
+            vec2(10.5, 10.5), // Should be outside all quadrants (None)
+        ];
+
+        let expected_quadrants = [Some(0), Some(1), Some(2), Some(3), None];
+        let results = points
+            .iter()
+            .map(|point| rect.quadrant(*point))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            results, expected_quadrants,
+            "Each point should match its expected quadrant"
+        );
+    }
+
+    #[test]
     fn circle_properties_and_bounds() {
         let circle = make_circle(5.0, 5.0, 5.0);
         assert_eq!(
-            circle.center(),
-            point![5.0, 5.0],
+            circle.center,
+            vec2(5.0, 5.0),
             "Center should be at (5.0, 5.0)"
         );
         assert_eq!(circle.radius, 5.0, "Radius should be 5.0");
         assert_eq!(
-            circle.start(),
-            point![0.0, 0.0],
-            "Start should be at (0.0, 0.0)"
-        );
-        assert_eq!(
-            circle.end(),
-            point![10.0, 10.0],
-            "End should be at (10.0, 10.0)"
+            circle.aabb(),
+            make_rect(0.0, 0.0, 10.0, 10.0),
+            "Rect should be (0.0, 0.0, 10.0, 10.0)"
         );
     }
 
@@ -393,15 +352,15 @@ mod tests {
     fn circle_contains_point() {
         let circle = make_circle(5.0, 5.0, 5.0);
         assert!(
-            circle.contains(&point![5.0, 5.0]),
+            circle.contains(vec2(5.0, 5.0)),
             "Circle should contain its center point"
         );
         assert!(
-            circle.contains(&point![0.0, 5.0]),
+            circle.contains(vec2(0.0, 5.0)),
             "Circle should contain point on its perimeter"
         );
         assert!(
-            !circle.contains(&point![0.0, 0.0]),
+            !circle.contains(vec2(0.0, 0.0)),
             "Circle should not contain points outside its boundary"
         );
     }

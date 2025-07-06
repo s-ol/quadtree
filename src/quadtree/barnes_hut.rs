@@ -1,227 +1,252 @@
-use nalgebra as na;
-
-use crate::{quadtree::Node, shapes::Shape, Mass, Point, QuadTree, P2};
+use crate::{
+    Point,
+    shapes::Rect,
+    util::{Partition, bound_items},
+};
+use glam::Vec2;
+use std::ops::Range;
 
 /// A point with mass
-#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct WeightedPoint {
-    pos: P2,
-    mass: f64,
+    pub pos: Vec2,
+    pub mass: f32,
 }
 
 impl WeightedPoint {
-    pub fn new(pos: P2, mass: f64) -> Self {
+    pub fn new(pos: Vec2, mass: f32) -> Self {
         Self { pos, mass }
     }
 }
 
 impl Point for WeightedPoint {
-    fn point(&self) -> P2 {
+    fn point(&self) -> Vec2 {
         self.pos
     }
 }
 
-impl Mass for WeightedPoint {
-    fn mass(&self) -> f64 {
-        self.mass
+#[derive(Debug)]
+struct Node {
+    bound: Rect,
+    children: usize,
+    next: usize,
+    cm: WeightedPoint,
+    items: Range<usize>,
+}
+
+impl Node {
+    fn new(bound: Rect, items: Range<usize>, next: usize) -> Self {
+        Self {
+            bound,
+            items,
+            next,
+            children: 0,
+            cm: WeightedPoint::default(),
+        }
     }
 }
 
-fn compute_cm<T: Point + Mass>(data: &[T]) -> WeightedPoint {
-    let mut total_mass = 0.0;
-    let mut weighted_sum = P2::origin();
-    for x in data {
-        let p = x.point();
-        let m = x.mass();
-        total_mass += m;
-        weighted_sum += m * p.coords;
-    }
-
-    let point = weighted_sum / total_mass;
-    WeightedPoint {
-        pos: point,
-        mass: total_mass,
-    }
+/// A Quadtree specially optimized for the Barnes-Hut algorithm
+///
+/// An interactive explanation of the algorithm can be found
+/// [here](https://jheer.github.io/barnes-hut/)
+///
+/// This quadtree is immutable and flat, not recursive. It is optimized to be rebuilt frequently
+/// and supports efficient accumulation of approximated force. Each step, convert your items into
+/// [`WeightedPoint`] and call the build method to clear and reconstruct the tree. Then for each
+/// item you need to accumulate force on, call the accumulate method, passing a custom force
+/// function.
+///
+/// This implementation is heavily inspired by [DeadlockCode's Barnes-Hut
+/// implementation](https://github.com/DeadlockCode/barnes-hut/tree/improved)
+#[derive(Debug)]
+pub struct BHQuadtree {
+    nodes: Vec<Node>,
+    internal_nodes: Vec<usize>,
+    items: Vec<WeightedPoint>,
+    theta2: f32,
 }
 
-impl<T: Point + Mass> QuadTree<T> {
-    /// Perform Barnes-Hut approximation for a single point
-    ///
-    /// An interactive explanation of the algorithm can be found [here](https://jheer.github.io/barnes-hut/)
-    ///
-    /// ### Arguments
-    /// * `subject` - The point to approximate forces for
-    /// * `theta` - The approximation threshold
-    ///
-    /// **Returns** a vector of approximated points to be used for force computation
-    pub fn barnes_hut(&mut self, subject: &impl Point, theta: f64) -> Vec<WeightedPoint> {
-        let mut results = Vec::with_capacity(self.count);
-        self.root.approximate_points(subject, theta, &mut results);
-        results
-    }
-}
-
-impl<T: Point + Mass> Node<T> {
-    /// Compute the center of mass of the node (point with no mass at the origin if no data)
-    fn center_of_mass(&mut self) -> WeightedPoint {
-        match self {
-            Self::Empty { .. } => WeightedPoint::default(),
-            Self::External { data, cm, .. } => match cm {
-                Some(wp) => *wp,
-                None => {
-                    let wp = compute_cm(data);
-                    *cm = Some(wp);
-                    wp
-                }
-            },
-            Self::Internal { children, cm, .. } => match cm {
-                Some(wp) => *wp,
-                None => {
-                    let weighted_points = children
-                        .iter_mut()
-                        .map(|c| c.center_of_mass())
-                        .collect::<Vec<_>>();
-                    let wp = compute_cm(&weighted_points);
-                    *cm = Some(wp);
-                    wp
-                }
-            },
+impl BHQuadtree {
+    /// Create a new empty BHQuadtree with a given theta parameter
+    pub fn new(theta: f32) -> Self {
+        Self {
+            nodes: Vec::new(),
+            internal_nodes: Vec::new(),
+            items: Vec::new(),
+            theta2: theta * theta,
         }
     }
 
-    /// Approximate points for force calculation using Barnes-Hut algorithm, lazily computing CoMs of nodes
-    fn approximate_points(
-        &mut self,
-        subject: &impl Point,
-        theta: f64,
-        results: &mut Vec<WeightedPoint>,
-    ) {
-        match self {
-            Self::Empty { .. } => (),
-            Self::External { data, .. } => results.extend(data.iter().map(|x| WeightedPoint {
-                pos: x.point(),
-                mass: 1.0,
-            })),
-            Self::Internal {
-                boundary, children, ..
-            } => {
-                let w = boundary.perimeter() / 4.0;
-                let d = na::distance(&subject.point(), &boundary.center());
-                if w / d < theta {
-                    results.push(self.center_of_mass());
-                } else {
-                    for c in children {
-                        c.approximate_points(subject, theta, results);
-                    }
+    /// Clear all internal data and reconstruct the tree from a sequence of weighted points
+    pub fn build(&mut self, items: Vec<WeightedPoint>, node_capacity: usize) {
+        self.nodes.clear();
+        self.internal_nodes.clear();
+        self.items = items;
+
+        let bound = bound_items(&self.items);
+        self.nodes.push(Node::new(bound, 0..self.items.len(), 0));
+
+        let mut n = 0;
+        while n < self.nodes.len() {
+            let range = self.nodes[n].items.clone();
+            if range.len() > node_capacity {
+                self.subdivide(n, range);
+            } else {
+                for i in range {
+                    self.nodes[n].cm.pos += self.items[i].pos * self.items[i].mass;
+                    self.nodes[n].cm.mass += self.items[i].mass;
                 }
             }
+            n += 1;
+        }
+
+        for &n in self.internal_nodes.iter().rev() {
+            let c = self.nodes[n].children;
+            for i in 0..4 {
+                let cm = self.nodes[c + i].cm;
+                self.nodes[n].cm.pos += cm.pos;
+                self.nodes[n].cm.mass += cm.mass;
+            }
+        }
+
+        for node in &mut self.nodes {
+            node.cm.pos /= node.cm.mass.max(f32::MIN_POSITIVE);
+        }
+    }
+
+    /// Accumulate a force vector to act on a target position with an arbitrary force function,
+    /// approximating weighted points based on the theta parameter.
+    pub fn accumulate<F: Fn(WeightedPoint) -> Vec2>(&self, target: Vec2, force_fn: F) -> Vec2 {
+        let mut acc = Vec2::ZERO;
+
+        let mut n = 0;
+        loop {
+            let node = &self.nodes[n];
+            let cm = node.cm;
+            let d2 = Vec2::distance_squared(target, cm.pos);
+            let s = (node.bound.bb - node.bound.aa).max_element();
+            if (s * s) < self.theta2 * d2 {
+                acc += force_fn(cm);
+                n = node.next;
+            } else if node.children == 0 {
+                for i in node.items.clone() {
+                    acc += force_fn(self.items[i]);
+                }
+                n = node.next;
+            } else {
+                n = node.children;
+            }
+
+            if n == 0 {
+                break;
+            }
+        }
+
+        acc
+    }
+
+    fn subdivide(&mut self, n: usize, range: Range<usize>) {
+        let c = self.nodes.len();
+        self.nodes[n].children = c;
+        self.internal_nodes.push(n);
+
+        let center = self.nodes[n].bound.center();
+
+        let mut split = [range.start, 0, 0, 0, range.end];
+
+        let predicate = |item: &WeightedPoint| item.pos.y < center.y;
+        split[2] = split[0] + self.items[split[0]..split[4]].partition(predicate);
+
+        let predicate = |item: &WeightedPoint| item.pos.x < center.x;
+        split[1] = split[0] + self.items[split[0]..split[2]].partition(predicate);
+        split[3] = split[2] + self.items[split[2]..split[4]].partition(predicate);
+
+        let bounds = self.nodes[n].bound.quarter();
+        let nexts = [c + 1, c + 2, c + 3, self.nodes[n].next];
+        for i in 0..4 {
+            let items = split[i]..split[i + 1];
+            self.nodes.push(Node::new(bounds[i], items, nexts[i]));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use nalgebra::point;
-
-    use crate::util::tests::make_rect;
-
     use super::*;
+    use crate::shapes::Rect;
+    use glam::vec2;
 
     #[test]
-    fn test_compute_cm() {
-        let points = vec![
-            point![0.0, 0.0],
-            point![2.0, 0.0],
-            point![0.0, 2.0],
-            point![2.0, 2.0],
-        ];
-
-        let cm = &compute_cm(&points);
-        assert_eq!(
-            cm.pos,
-            point![1.0, 1.0],
-            "Position should be the center of mass"
-        );
-        assert_eq!(cm.mass, 4.0, "Total mass should be the sum of all masses");
+    fn test_weighted_point_traits() {
+        let p = WeightedPoint::new(vec2(3.0, 4.0), 2.5);
+        // Default
+        let def = WeightedPoint::default();
+        assert_eq!(def.pos, vec2(0.0, 0.0));
+        assert_eq!(def.mass, 0.0);
+        // Point trait
+        assert_eq!(p.pos, vec2(3.0, 4.0));
     }
 
     #[test]
-    fn test_compute_cm_weighted() {
-        let points = vec![
-            WeightedPoint {
-                pos: point![0.0, 0.0],
-                mass: 1.0,
-            },
-            WeightedPoint {
-                pos: point![2.0, 0.0],
-                mass: 1.0,
-            },
-            WeightedPoint {
-                pos: point![0.0, 2.0],
-                mass: 1.0,
-            },
-            WeightedPoint {
-                pos: point![2.0, 2.0],
-                mass: 5.0,
-            },
-        ];
-
-        let cm = &compute_cm(&points);
-        assert_eq!(
-            cm.pos,
-            point![1.5, 1.5],
-            "Position should be the center of mass"
-        );
-        assert_eq!(cm.mass, 8.0, "Total mass should be the sum of all masses");
+    fn test_node_new_initializer() {
+        let rect = Rect::new(vec2(0.0, 1.0), vec2(1.0, 2.0));
+        let range = 0..5;
+        let node = Node::new(rect, range.clone(), 7);
+        assert_eq!(node.children, 0);
+        assert_eq!(node.next, 7);
+        assert_eq!(node.items, range);
+        assert_eq!(node.bound, rect);
+        assert_eq!(node.cm, WeightedPoint::default());
     }
 
     #[test]
-    fn barnes_hut() {
-        let mut qt = QuadTree::new(make_rect(0.0, 0.0, 100.0, 100.0), 1);
-
-        let points = vec![
-            // 1st quadrant
-            point![10.0, 10.0],
-            point![10.0, 40.0],
-            point![40.0, 10.0],
-            point![40.0, 40.0],
-            // 2nd quadrant
-            point![10.0, 60.0],
-            point![10.0, 90.0],
-            point![40.0, 60.0],
-            point![40.0, 90.0],
-            // 3rd quadrant
-            point![60.0, 10.0],
-            point![60.0, 40.0],
-            point![90.0, 10.0],
-            point![90.0, 40.0],
-            // 4th quadrant
-            point![60.0, 60.0],
-            point![60.0, 90.0],
-            point![90.0, 60.0],
-            point![90.0, 90.0],
+    fn test_build_and_accumulate_no_subdivide() {
+        // two points, no subdivide (capacity >= 2)
+        let pts = vec![
+            WeightedPoint::new(vec2(0.0, 0.0), 1.0),
+            WeightedPoint::new(vec2(1.0, 0.0), 1.0),
         ];
+        let mut qt = BHQuadtree::new(0.0); // theta=0 forces full traversal
+        qt.build(pts.clone(), 2);
+        // one node
+        assert_eq!(qt.nodes.len(), 1);
+        // cm should be average of positions
+        let cm = qt.nodes[0].cm;
+        assert_eq!(cm.pos, vec2(0.5, 0.0));
+        assert_eq!(cm.mass, 2.0);
+        // accumulate with identity on items
+        let sum: glam::Vec2 = qt.accumulate(vec2(0.0, 0.0), |wp| wp.pos);
+        // since theta=0, it will sum items directly: (0,0)+(1,0)
+        assert_eq!(sum, vec2(1.0, 0.0));
+        // accumulate with theta large to use cm
+        let mut qt2 = BHQuadtree::new(1000.0);
+        qt2.build(pts.clone(), 2);
+        let avg: glam::Vec2 = qt2.accumulate(vec2(0.0, 0.0), |wp| wp.pos);
+        // should return cm.pos only
+        assert_eq!(avg, vec2(0.5, 0.0));
+    }
 
-        qt.insert_many(&points);
-
-        let approx = qt.barnes_hut(&point![25.0, 25.0], 1.0);
-        assert_eq!(approx.len(), 13, "Points were collapsed with theta 1.0");
-        assert!(approx.contains(&WeightedPoint::new(point![75.0, 75.0], 4.0)));
-
-        let approx = qt.barnes_hut(&point![25.0, 25.0], 2.0);
-        assert_eq!(approx.len(), 7, "Points were collapsed with theta 2.0");
-        assert!(approx.contains(&WeightedPoint::new(point![25.0, 75.0], 4.0)));
-        assert!(approx.contains(&WeightedPoint::new(point![75.0, 25.0], 4.0)));
-
-        let approx = qt.barnes_hut(&point![50.0, 50.0], 0.0);
-        assert_eq!(approx.len(), 16, "All points were included with theta 0.0");
-
-        let approx = qt.barnes_hut(&point![0.0, 0.0], 5.0);
-        assert_eq!(
-            approx.len(),
-            1,
-            "All points were collapsed with high theta and point in corner"
-        );
-        assert!(approx.contains(&WeightedPoint::new(point![50.0, 50.0], 16.0)));
+    #[test]
+    fn test_subdivide_and_accumulate() {
+        // two points, capacity=1 so it subdivides
+        let pts = vec![
+            WeightedPoint::new(vec2(0.0, 0.0), 1.0),
+            WeightedPoint::new(vec2(2.0, 0.0), 1.0),
+        ];
+        let mut qt = BHQuadtree::new(0.0);
+        qt.build(pts, 1);
+        // root + 4 children
+        assert_eq!(qt.nodes.len(), 1 + 4);
+        // internal_nodes contains root index 0
+        assert_eq!(qt.internal_nodes, vec![0]);
+        // each leaf has its own single point
+        for child_idx in qt.nodes[0].children..qt.nodes[0].children + 4 {
+            let leaf = &qt.nodes[child_idx];
+            assert!(leaf.items.len() <= 1);
+        }
+        // accumulate with theta=0 sums two points
+        let sum = qt.accumulate(vec2(1.0, 0.0), |wp| wp.pos);
+        assert_eq!(sum, vec2(2.0, 0.0));
     }
 }

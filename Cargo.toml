@@ -1,18 +1,18 @@
 [package]
 name = "quadtree"
-version = "0.3.6"
-edition = "2021"
+version = "0.4.0"
+edition = "2024"
 description = "A generic quadtree implementation"
 license = "MIT"
 repository = "https://github.com/benbaarber/quadtree"
 keywords = ["quadtree", "barnes-hut"]
 
 [features]
-serde = ["dep:serde", "nalgebra/serde-serialize"]
+serde = ["dep:serde", "glam/serde"]
 
 [dependencies]
-nalgebra = "0.33.0"
-serde = { version = "1.0.204", optional = true, features = ["derive"] }
+glam = "0.30.4"
+serde = { version = "1.0.219", optional = true, features = ["derive"] }
 
 [dev-dependencies]
-serde_json = "1.0.122"
+serde_json = "1.0.140"

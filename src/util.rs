@@ -1,21 +1,64 @@
+use glam::vec2;
+
 use crate::{
-    shapes::{Rect, Shape},
     Point,
+    shapes::{Rect, Shape},
 };
 
-pub(crate) fn determine_quadrant<T: Point>(rect: &Rect, item: &T) -> Option<usize> {
-    for (i, rect) in rect.quarter().iter().enumerate() {
-        if rect.contains(&item.point()) {
-            return Some(i);
-        }
+/// Get bounding rect for a list of items
+pub(crate) fn bound_items<T: Point>(items: &[T]) -> Rect {
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+
+    for item in items {
+        let p = item.point();
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
     }
-    None
+
+    Rect::new(vec2(min_x, min_y), vec2(max_x, max_y))
 }
 
-pub(crate) fn group_by_quadrant<T: Point>(rect: &Rect, items: Vec<T>) -> [Vec<T>; 5] {
+// https://github.com/DeadlockCode/barnes-hut/blob/improved/src/partition.rs
+pub(crate) trait Partition<T> {
+    fn partition<F: Fn(&T) -> bool>(&mut self, predicate: F) -> usize;
+}
+
+impl<T> Partition<T> for [T] {
+    fn partition<F: Fn(&T) -> bool>(&mut self, predicate: F) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
+
+        let mut l = 0;
+        let mut r = self.len() - 1;
+
+        loop {
+            while l <= r && predicate(&self[l]) {
+                l += 1;
+            }
+            while l < r && !predicate(&self[r]) {
+                r -= 1;
+            }
+            if l >= r {
+                return l;
+            }
+
+            self.swap(l, r);
+            l += 1;
+            r -= 1;
+        }
+    }
+}
+
+pub(crate) fn group_by_quadrant<T: Point>(rect: Rect, items: Vec<T>) -> [Vec<T>; 5] {
     let mut groups: [Vec<T>; 5] = std::array::from_fn(|_| Vec::with_capacity(items.len()));
     for item in items {
-        match determine_quadrant(rect, &item) {
+        match rect.quadrant(item.point()) {
             Some(q) => groups[q].push(item),
             None => groups[4].push(item),
         }
@@ -24,13 +67,10 @@ pub(crate) fn group_by_quadrant<T: Point>(rect: &Rect, items: Vec<T>) -> [Vec<T>
 }
 
 #[allow(unused)]
-pub(crate) fn group_by_quadrant_slice<'a, T: Point>(
-    rect: &Rect,
-    items: &'a [T],
-) -> [Vec<&'a T>; 5] {
+pub(crate) fn group_by_quadrant_slice<'a, T: Point>(rect: Rect, items: &'a [T]) -> [Vec<&'a T>; 5] {
     let mut groups: [Vec<&T>; 5] = std::array::from_fn(|_| Vec::with_capacity(items.len()));
     for item in items {
-        match determine_quadrant(rect, item) {
+        match rect.quadrant(item.point()) {
             Some(q) => groups[q].push(item),
             None => groups[4].push(item),
         }
@@ -50,63 +90,40 @@ pub(crate) fn determine_overlap_quadrants(outer: &Rect, inner: &Rect) -> Vec<usi
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use nalgebra::point;
+    use glam::vec2;
 
     use crate::shapes::*;
 
     use super::*;
 
-    pub(crate) fn make_rect(x1: f64, y1: f64, x2: f64, y2: f64) -> Rect {
-        Rect::new(point![x1, y1], point![x2, y2])
+    pub(crate) fn make_rect(x1: f32, y1: f32, x2: f32, y2: f32) -> Rect {
+        Rect::new(vec2(x1, y1), vec2(x2, y2))
     }
 
-    pub(crate) fn make_circle(x: f64, y: f64, r: f64) -> Circle {
-        Circle::new(point![x, y], r)
-    }
-
-    #[test]
-    fn test_determine_quadrant() {
-        let rect = make_rect(0.0, 0.0, 10.0, 10.0);
-        let points = [
-            point![2.5, 2.5],   // Should be in the first quadrant (index 0)
-            point![7.5, 2.5],   // Should be in the second quadrant (index 1)
-            point![2.5, 7.5],   // Should be in the third quadrant (index 2)
-            point![7.5, 7.5],   // Should be in the fourth quadrant (index 3)
-            point![10.5, 10.5], // Should be outside all quadrants (None)
-        ];
-
-        let expected_quadrants = [Some(0), Some(1), Some(2), Some(3), None];
-        let results = points
-            .iter()
-            .map(|point| determine_quadrant(&rect, point))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            results, expected_quadrants,
-            "Each point should match its expected quadrant"
-        );
+    pub(crate) fn make_circle(x: f32, y: f32, r: f32) -> Circle {
+        Circle::new(vec2(x, y), r)
     }
 
     #[test]
     fn test_group_by_quadrant() {
         let rect = make_rect(0.0, 0.0, 10.0, 10.0);
         let points = [
-            point![2.5, 2.5],   // Should be in the first quadrant (index 0)
-            point![7.5, 2.5],   // Should be in the second quadrant (index 1)
-            point![2.5, 7.5],   // Should be in the third quadrant (index 2)
-            point![7.5, 7.5],   // Should be in the fourth quadrant (index 3)
-            point![10.5, 10.5], // Should be outside all quadrants (index 4)
+            vec2(2.5, 2.5),   // Should be in the first quadrant (index 0)
+            vec2(7.5, 2.5),   // Should be in the second quadrant (index 1)
+            vec2(2.5, 7.5),   // Should be in the third quadrant (index 2)
+            vec2(7.5, 7.5),   // Should be in the fourth quadrant (index 3)
+            vec2(10.5, 10.5), // Should be outside all quadrants (index 4)
         ];
 
         let expected_groups = [
-            vec![point![2.5, 2.5]],
-            vec![point![7.5, 2.5]],
-            vec![point![2.5, 7.5]],
-            vec![point![7.5, 7.5]],
-            vec![point![10.5, 10.5]],
+            vec![vec2(2.5, 2.5)],
+            vec![vec2(7.5, 2.5)],
+            vec![vec2(2.5, 7.5)],
+            vec![vec2(7.5, 7.5)],
+            vec![vec2(10.5, 10.5)],
         ];
 
-        let results = group_by_quadrant(&rect, points.to_vec());
+        let results = group_by_quadrant(rect, points.to_vec());
 
         for (expected, result) in expected_groups.iter().zip(results.iter()) {
             assert_eq!(
@@ -150,5 +167,32 @@ pub(crate) mod tests {
             &[0, 1, 2, 3],
             "Inner rectangle overlaps the boundary between all quadrants."
         );
+    }
+
+    #[test]
+    fn test_partition_basic() {
+        let mut arr = [1, 4, 2, 5, 3];
+        // move all < 4 to front
+        let pivot = arr.partition(|&x| x < 4);
+        // elements before pivot are <4, after >=4
+        assert_eq!(pivot, 3);
+        assert!(arr[..pivot].iter().all(|&x| x < 4));
+        assert!(arr[pivot..].iter().all(|&x| x >= 4));
+    }
+
+    #[test]
+    fn test_bound_items_rect() {
+        let pts = vec![vec2(0.0, 0.0), vec2(2.0, 4.0)];
+        let bound = bound_items(&pts);
+        // center should be midpoint
+        assert_eq!(bound.center(), vec2(1.0, 2.0));
+        // perimeter = 2*(width+height) = 2*(2+4) = 12
+        assert_eq!(bound.perimeter(), 12.0);
+        // quarter() should produce four sub-rectangles of equal size
+        let quads = bound.quarter();
+        for qr in &quads {
+            // each quadrant width = 1, height = 2
+            assert_eq!(qr.perimeter(), 2.0 * (1.0 + 2.0));
+        }
     }
 }

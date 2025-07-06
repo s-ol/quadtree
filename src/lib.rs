@@ -2,32 +2,18 @@ mod quadtree;
 pub mod shapes;
 mod util;
 
-use nalgebra::Point2;
-pub use quadtree::barnes_hut::WeightedPoint;
-pub use quadtree::QuadTree;
+pub use glam::{Vec2, vec2};
+pub use quadtree::Quadtree;
+pub use quadtree::barnes_hut::{BHQuadtree, WeightedPoint};
 
-/// A 2-dimensional point with `f64` values (alias of [`nalgebra::Point2`])
-pub type P2 = Point2<f64>;
-
-/// Trait for getting a 2d point position of data stored in the [`QuadTree`]
+/// Trait for getting a 2d point position of data stored in the [`Quadtree`]
 pub trait Point {
     /// Get 2d point position
-    fn point(&self) -> P2;
+    fn point(&self) -> Vec2;
 }
 
-impl Point for P2 {
-    fn point(&self) -> P2 {
+impl Point for Vec2 {
+    fn point(&self) -> Vec2 {
         *self
-    }
-}
-
-/// Trait for getting the mass of data stored in the [`QuadTree`], enables use of Barnes-Hut approximation
-pub trait Mass {
-    fn mass(&self) -> f64;
-}
-
-impl Mass for P2 {
-    fn mass(&self) -> f64 {
-        1.0
     }
 }
