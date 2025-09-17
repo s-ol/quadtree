@@ -1,6 +1,10 @@
 pub mod barnes_hut;
 
 use glam::Vec2;
+
+extern crate alloc;
+use alloc::{boxed::Box, vec, vec::Vec};
+
 #[cfg(feature = "serde")]
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 
@@ -229,7 +233,7 @@ impl<T: Point + Clone> Node<T> {
                     return true;
                 }
 
-                let mut data = std::mem::take(data);
+                let mut data = core::mem::take(data);
                 data.push(item.clone());
                 let children = self.subdivide();
                 *self = Self::Internal { bound, children };
