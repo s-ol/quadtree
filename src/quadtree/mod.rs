@@ -116,6 +116,11 @@ impl<T: Point + Clone> Quadtree<T> {
         results
     }
 
+    /// Shrink to fit inserted items
+    pub fn shrink(&mut self) {
+        self.root = self.root.shrink();
+    }
+
     /// Delete items that are within a specified shape area
     ///
     /// **Returns** the number of items that were deleted
@@ -488,6 +493,29 @@ impl<T: Point + Clone> Node<T> {
                 false
             }
             Self::Empty { .. } => true,
+        }
+    }
+
+    fn shrink(&mut self) -> Self {
+        let default: Self = Node::Empty {
+            bound: Rect::new(Vec2::default(), Vec2::default()),
+        };
+
+        match self {
+            Self::Empty { .. } => core::mem::replace(self, default),
+            Self::External { .. } => core::mem::replace(self, default),
+            Self::Internal { children, .. } => {
+                let mut nonempty: Vec<&mut Box<Self>> = children
+                    .into_iter()
+                    .filter(|e| !matches!(***e, Node::Empty { .. }))
+                    .collect();
+
+                if nonempty.len() == 1 {
+                    nonempty[0].shrink()
+                } else {
+                    core::mem::replace(self, default)
+                }
+            }
         }
     }
 
